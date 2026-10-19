@@ -1330,6 +1330,8 @@ public final class BLEManager: NSObject, ObservableObject {
     /// The last entry point `whoopConnectAllowed` turned away, so the block is logged once per path
     /// rather than on every tick of the family-rotation timer.
     private var lastBlockedConnectReason: String?
+    /// Mirror mode's refusal is logged once per launch (see `mirrorModeRefuses`).
+    private var mirrorRefusalLogged = false
 
     /// #1635: one `ScanAdvertisementSummary` line per SCAN, not per process — the question it answers
     /// is only visible by comparing a scan before the strap was put in pairing mode against one after,
@@ -1655,6 +1657,7 @@ public final class BLEManager: NSObject, ObservableObject {
     }
 
     private func connectCore(model: WhoopModel) {
+        guard !mirrorModeRefuses("connect") else { return }
         intentionalDisconnect = false
         // Connection test mode: stamp when this connect attempt began so didConnect can report the connect
         // latency. A plain Date() assignment, no behaviour change; only read behind the .connection gate.
@@ -2089,6 +2092,19 @@ public final class BLEManager: NSObject, ObservableObject {
             : "WHOOP is no longer the active device — not scanning or connecting until it is again (#1881)")
     }
 
+    /// Mirror mode (Mac) refuses every scan and connect: this app shows a copy of the iPhone's data and
+    /// must never take the strap's single bond away from the phone. Checked by `whoopConnectAllowed` and
+    /// by the user-initiated entry points that bypass it (`connectCore`, `scanForWhoops`, `startScan`,
+    /// the discovery connect). Logged once per launch.
+    private func mirrorModeRefuses(_ reason: String) -> Bool {
+        guard MirrorMode.isEnabled else { return false }
+        if !mirrorRefusalLogged {
+            mirrorRefusalLogged = true
+            log("Mirror mode: \(reason) refused. This Mac mirrors the iPhone's data and never connects to the strap.")
+        }
+        return true
+    }
+
     /// The one gate every WHOOP scan/connect entry point passes through (#1881).
     ///
     /// Deliberately at the CONNECT sites rather than only at `connectCore`: there are five
@@ -2101,6 +2117,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// says which path tried. Logged only on the transition into blocking, so a rotation timer cannot
     /// flood the log.
     private func whoopConnectAllowed(_ reason: String) -> Bool {
+        if mirrorModeRefuses(reason) { return false }
         if whoopIsActiveDevice { return true }
         // The flag is a CACHE of a registry fact, and the registry is the authority. Re-validate before
         // refusing, so the gate can never latch: it is set from the coordinator's stop/start closures and
@@ -2156,6 +2173,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// The wizard MUST call `stopWhoopScan()` before any normal connect resumes — this mode owns the
     /// central while active. No-op-to-the-connect-path: it never touches `peripheral`/bond state.
     public func scanForWhoops() {
+        guard !mirrorModeRefuses("add-a-WHOOP scan") else { return }
         guard central.state == .poweredOn else {
             log("Add-a-WHOOP scan: Bluetooth not powered on (state=\(central.state.rawValue))")
             return
@@ -5098,6 +5116,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// from the already-gated `connectFromSystem` — and this method's own family-rotation timer, which
     /// cannot start a scan that one of those did not. Gating here as well would block the user's Connect.
     private func startScan(for model: WhoopModel, allowFallback: Bool) {
+        guard !mirrorModeRefuses("scan") else { return }
         advertisementLogged = false
         cancelScanFallback()
         selectedModel = model
@@ -5957,6 +5976,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         // No gate here for the same reason as `startScan`: reaching a discovery means a scan is running,
         // and a scan only runs because the user asked or because the gated system entry allowed it.
+        guard !mirrorModeRefuses("discovery connect") else { central.stopScan(); return }
         cancelScanFallback()
         persistSelectedModel(selectedModel)
         log("Discovered \(safeName) (rssi \(RSSI)) — connecting")
