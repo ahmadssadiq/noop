@@ -577,6 +577,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (`DeviceRegistry`, and the coordinator that watches it) follows too — the store write above is not
     /// observable, so without this the UI would keep showing the old id until relaunch.
     var onSerialIdentityAdopted: ((String) -> Void)?
+    /// Fired on every inbound notification. Each one is a moment iOS lets a backgrounded app run, so
+    /// the incoming-call alert uses it to re-check for a ringing call (`CallBuzzMonitor.poll`).
+    var onInboundFrame: (() -> Void)?
     private var registryStore: DeviceRegistryStore?
     /// #716: true once the seeded "WHOOP" model has been stamped to the correct family.
     private var modelStamped = false
@@ -2279,7 +2282,8 @@ public final class BLEManager: NSObject, ObservableObject {
     ///   - writeType: BLE write type; defaults to `.withoutResponse` so all existing call
     ///     sites are unaffected. Pass `.withResponse` for acked commands (e.g. historicalDataResult).
     public func send(_ command: WhoopCommand, payload: [UInt8] = [0x00],
-                     writeType: CBCharacteristicWriteType = .withoutResponse) {
+                     writeType: CBCharacteristicWriteType = .withoutResponse,
+                     maverickEffect: UInt8 = 47) {   // 5/MG buzz strength, see MaverickHaptics.notificationBuzz
         // #314 parity: CoreBluetooth already covers both Android defects here — this `p.state == .connected`
         // guard makes a write a no-op once the radio powers off (no DeadObjectException to crash on), and
         // centralManagerDidUpdateState publishes state.connected = false on .poweredOff, so the iOS/macOS UI
@@ -2426,7 +2430,7 @@ public final class BLEManager: NSObject, ObservableObject {
             // that asked for one. Kotlin twin: `WhoopBleClient.maverickHapticBody`.
             let buzzLoops = payload.count >= 2 ? Int(payload[1]) : 1
             let puffinPayload: [UInt8] = isHaptics
-                ? MaverickHaptics.notificationBuzz(loops: buzzLoops) : payload
+                ? MaverickHaptics.notificationBuzz(loops: buzzLoops, effect: maverickEffect) : payload
             seq = seq &+ 1
             let frame = puffinCommandFrame(cmd: puffinCmd, seq: seq, payload: puffinPayload)
             p.writeValue(Data(frame), for: ch, type: writeType)
@@ -5592,6 +5596,20 @@ public final class BLEManager: NSObject, ObservableObject {
         log("Buzz: one-shot fired (patternId=2 loops=3 + runAlarm, acked)")
     }
 
+    /// Incoming-call wrist alert (`CallBuzzMonitor`). On a 5/MG this is the maverick notify buzz alone
+    /// (the same hardware-confirmed one-shot Haptic Clock uses), acknowledged so a backgrounded link
+    /// can't silently drop it, and without RUN_ALARM so a repeated call buzz never starts the alarm.
+    /// One notch softer than other buzzes: DRV2625 effect 48 ("Buzz 2 – 80%") instead of 47 (100%).
+    /// Other families take the full one-shot sequence, since a bare pattern write was seen ignored on a
+    /// WHOOP 4.0 (#921).
+    func buzzCallAlert() {
+        guard selectedModel.deviceFamily == .whoop5 else {
+            buzzStrapOnce()
+            return
+        }
+        send(.runHapticsPattern, payload: [2, 3, 0, 0, 0], writeType: .withResponse, maverickEffect: 48)
+    }
+
     /// Haptic Clock (#460): buzz the current wall-clock time out on the strap so the user can read it
     /// off their wrist without a screen. The pure, unit-tested `HapticClock` encoder turns now into an
     /// ordered pulse list (long = a "ten", short = a "unit", in HH-tens / HH-units / MM-tens / MM-units
@@ -7313,6 +7331,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         guard let data = characteristic.value else { return }
         let bytes = [UInt8](data)
         lastDataAt = Date()   // feed the liveness watchdog on every notification
+        onInboundFrame?()
         // #1809: count BEFORE the per-characteristic switch below, so the tally covers every inbound
         // frame including ones no branch consumes - the epitaph must answer "did anything arrive at all".
         inboundFrames += 1

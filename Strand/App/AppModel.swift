@@ -56,6 +56,10 @@ final class AppModel: ObservableObject {
     let live: LiveState
     /// CoreBluetooth engine , scans, connects, bonds, streams.
     let ble: BLEManager
+    #if os(iOS)
+    /// Buzzes the strap while an incoming call rings (Settings → Buzz strap for incoming calls).
+    private var callBuzz: CallBuzzMonitor?
+    #endif
     /// Read model over the on-device store (dashboard + detail screens).
     let repo: Repository
     /// User profile (age/sex/body/HR-max) for zones, calories, baselines.
@@ -542,6 +546,20 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 1_800_000_000_000)  // 30 min backstop (#836 battery)
             }
         }
+
+        #if os(iOS)
+        // Incoming-call wrist alert. Created at launch (including a Bluetooth state-restoration relaunch
+        // into the background) so it is watching before any screen opens.
+        let callBuzz = CallBuzzMonitor(
+            buzz: { [ble, live] in
+                guard live.connected else { return false }
+                ble.buzzCallAlert()
+                return true
+            },
+            log: { [live] line in live.append(log: line) })
+        self.callBuzz = callBuzz
+        ble.onInboundFrame = { [weak callBuzz] in callBuzz?.poll() }
+        #endif
     }
 
     /// Build the device registry + source coordinator once the store is open, then start observing.
