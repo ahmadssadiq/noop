@@ -1730,7 +1730,7 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
                 .tint(StrandPalette.accent)
                 .accessibilityHint("Buzzes your strap while a call is ringing")
-                Text("Buzzes your strap while a call rings: phone calls, FaceTime, and apps that ring like a phone call, such as WhatsApp voice and video. Keeps buzzing until you answer or decline, or the call ends. NOOP only sees that a call is ringing, never who is calling.")
+                Text("Buzzes your strap while a call rings: phone calls, FaceTime, and apps that ring like a phone call, such as WhatsApp voice and video. Keeps buzzing until you answer or decline, or the call ends. Double-tap the strap to stop the buzzing (the call itself keeps ringing on your phone). NOOP only sees that a call is ringing, never who is calling.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)

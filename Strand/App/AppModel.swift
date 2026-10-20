@@ -559,6 +559,8 @@ final class AppModel: ObservableObject {
             log: { [live] line in live.append(log: line) })
         self.callBuzz = callBuzz
         ble.onInboundFrame = { [weak callBuzz] in callBuzz?.poll() }
+        // Keep the link free while a call buzzes, so a double-tap to silence it isn't queued behind a sync.
+        ble.holdStrapEventSync = { [weak callBuzz] in callBuzz?.isAlerting ?? false }
         #endif
     }
 
@@ -1812,6 +1814,15 @@ final class AppModel: ObservableObject {
 
     private func handleDoubleTap() {
         let now = Date()
+        #if os(iOS)
+        // A buzzing incoming-call alert claims the double-tap ahead of everything else (debounce, Lift
+        // Log, the configured action): two taps silence it. A tap with no call buzzing falls through.
+        if callBuzz?.dismissFromStrap() == true {
+            lastDoubleTapAt = now
+            live.append(log: Self.stamped("Double-tap → stop call buzz"))
+            return
+        }
+        #endif
         let since = now.timeIntervalSince(lastDoubleTapAt)
         guard since > 1.2 else {   // debounce repeats
             live.append(log: Self.stamped(String(format: "Double-tap ignored: %.1f s after the previous one (debounce 1.2 s)", since)))

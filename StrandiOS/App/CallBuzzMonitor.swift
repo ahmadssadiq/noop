@@ -21,9 +21,10 @@ import UIKit
 final class CallBuzzMonitor: NSObject, CXCallObserverDelegate {
     static let enabledKey = "notif.calls.enabled"
 
-    /// One burst (3 pulses) plays for about 2 s on the strap (strap log: "Sequence fired" → "SEQ done"),
-    /// so a new burst every 3 s keeps the wrist buzzing with a short pause between bursts.
-    static let repeatInterval: TimeInterval = 3
+    /// One burst is 2 pulses, about 1.3 s on the strap (a 3-pulse burst measured ~2 s, "Sequence fired" →
+    /// "SEQ done"), so a new burst every 2 s keeps the wrist buzzing with a short pause between bursts.
+    /// Kept short because a burst already sent plays out after a double-tap silences the alert.
+    static let repeatInterval: TimeInterval = 2
     /// Self-heal ceiling (Android `MAX_RING_WINDOW_MS`): a cycle never runs longer than this even if
     /// the call's end is never observed. Longer than any normal ring before voicemail.
     static let maxRingWindow: TimeInterval = 90
@@ -31,11 +32,15 @@ final class CallBuzzMonitor: NSObject, CXCallObserverDelegate {
     static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
 
     private let observer = CXCallObserver()
+    private let callController = CXCallController()
     /// Fires one buzz; returns false when the strap can't be reached (not connected).
     private let buzz: () -> Bool
     private let log: (String) -> Void
 
     private var cycleCallID: UUID?
+    /// Set by a strap double-tap (`dismissFromStrap`): no more buzzes for `cycleCallID`, even though it
+    /// may keep ringing. Cleared when the call stops ringing.
+    private var dismissed = false
     private var cycleStartedAt: Date?
     private var buzzCount = 0
     private var lastBuzzAt: Date?
@@ -76,6 +81,44 @@ final class CallBuzzMonitor: NSObject, CXCallObserverDelegate {
         }
     }
 
+    /// True while the strap is being buzzed for a ringing call (not silenced, not past the ceiling).
+    /// BLEManager holds off strap-event-triggered history syncs meanwhile: each buzz makes the strap
+    /// report HAPTICS_FIRED, which would start a multi-second offload, and on hardware a DOUBLE_TAP sensed
+    /// during that offload reached the phone ~1.5 s late, so silencing seemed to need a second try.
+    var isAlerting: Bool {
+        guard cycleCallID != nil, !dismissed, let start = cycleStartedAt else { return false }
+        return Date().timeIntervalSince(start) < Self.maxRingWindow
+    }
+
+    /// Strap double-tap while a call is buzzing: stop buzzing for this call and return true (the tap is
+    /// consumed). Returns false when nothing is buzzing, so the tap does whatever it normally does.
+    ///
+    /// It also asks CallKit to end the call. iOS only performs CXEndCallAction for calls the requesting
+    /// app's own CXProvider reported, so for phone, FaceTime and WhatsApp calls it is expected to refuse
+    /// (no public API ends or declines another app's call; the sanctioned accessory route is ANCS,
+    /// which needs the strap's firmware to be the ANCS client). Confirmed on an iPhone 16 Pro (iOS 26)
+    /// for a phone call: com.apple.CallKit.error.requesttransaction 1 (unknownCallProvider). The
+    /// outcome is still logged, so the strap log records exactly what iOS answered.
+    func dismissFromStrap() -> Bool {
+        guard let id = cycleCallID, !dismissed, ringingCall()?.uuid == id else { return false }
+        dismissed = true
+        repeatWork?.cancel()
+        repeatWork = nil
+        log("Call alert: stopped by double-tap after \(buzzCount) buzz\(buzzCount == 1 ? "" : "es")")
+        callController.request(CXTransaction(action: CXEndCallAction(call: id))) { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error = error as NSError? {
+                    self.log("Call alert: iOS declined to end the call (\(error.domain) \(error.code): \(error.localizedDescription))")
+                } else {
+                    self.log("Call alert: call ended from the strap")
+                }
+                self.endBackgroundTask()
+            }
+        }
+        return true
+    }
+
     /// An incoming call that is still ringing: not placed by us, not answered, not ended.
     private func ringingCall() -> CXCall? {
         observer.calls.first { !$0.isOutgoing && !$0.hasConnected && !$0.hasEnded }
@@ -99,8 +142,9 @@ final class CallBuzzMonitor: NSObject, CXCallObserverDelegate {
         repeatWork = nil
         let now = Date()
         let expired = cycleStartedAt.map { now.timeIntervalSince($0) >= Self.maxRingWindow } ?? true
-        // Past the ceiling: stop buzzing. `cycleCallID` is kept so the same call can't restart the cycle.
-        guard !expired else {
+        // Silenced by a double-tap, or past the ceiling: stop buzzing. `cycleCallID` is kept so the same
+        // call can't restart the cycle.
+        guard !dismissed, !expired else {
             endBackgroundTask()
             return
         }
@@ -122,10 +166,11 @@ final class CallBuzzMonitor: NSObject, CXCallObserverDelegate {
 
     private func stopCycle() {
         guard cycleCallID != nil else { return }
-        log("Call alert: stopped after \(buzzCount) buzz\(buzzCount == 1 ? "" : "es")")
+        if !dismissed { log("Call alert: stopped after \(buzzCount) buzz\(buzzCount == 1 ? "" : "es")") }
         repeatWork?.cancel()
         repeatWork = nil
         cycleCallID = nil
+        dismissed = false
         cycleStartedAt = nil
         buzzCount = 0
         lastBuzzAt = nil

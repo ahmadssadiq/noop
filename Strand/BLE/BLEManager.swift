@@ -580,6 +580,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Fired on every inbound notification. Each one is a moment iOS lets a backgrounded app run, so
     /// the incoming-call alert uses it to re-check for a ringing call (`CallBuzzMonitor.poll`).
     var onInboundFrame: (() -> Void)?
+    /// Asked before a strap-pushed EVENT kicks a history sync; true holds that sync off. AppModel points
+    /// it at the incoming-call alert: a sync started by the alert's own HAPTICS_FIRED events delayed the
+    /// strap's DOUBLE_TAP by ~1.5 s on hardware. Held syncs aren't lost; the next trigger or tick runs one.
+    var holdStrapEventSync: (() -> Bool)?
     private var registryStore: DeviceRegistryStore?
     /// #716: true once the seeded "WHOOP" model has been stamped to the correct family.
     private var modelStamped = false
@@ -1385,7 +1389,10 @@ public final class BLEManager: NSObject, ObservableObject {
         central = CBCentralManager(delegate: self, queue: .main)
         #endif
         // Strap-as-clock: an incoming EVENT packet kicks a rate-limited catch-up sync.
-        router.onSyncTrigger = { [weak self] in self?.requestSync(.strap) }
+        router.onSyncTrigger = { [weak self] in
+            guard let self, self.holdStrapEventSync?() != true else { return }
+            self.requestSync(.strap)
+        }
         router.onStrapSerial = { [weak self] serial in self?.noteHarvardSerial(serial) }   // #1193
         // #78 hole-4: a paused-for-bond-loop strap gets one bounded salvage attempt per app-foreground.
         installForegroundSalvageProbe()
@@ -1597,7 +1604,10 @@ public final class BLEManager: NSObject, ObservableObject {
         central = CBCentralManager(delegate: self, queue: .main)
         #endif
         // Strap-as-clock: an incoming EVENT packet kicks a rate-limited catch-up sync.
-        router.onSyncTrigger = { [weak self] in self?.requestSync(.strap) }
+        router.onSyncTrigger = { [weak self] in
+            guard let self, self.holdStrapEventSync?() != true else { return }
+            self.requestSync(.strap)
+        }
         router.onStrapSerial = { [weak self] serial in self?.noteHarvardSerial(serial) }   // #1193
         // #78 hole-4: a paused-for-bond-loop strap gets one bounded salvage attempt per app-foreground.
         installForegroundSalvageProbe()
@@ -5626,7 +5636,8 @@ public final class BLEManager: NSObject, ObservableObject {
             buzzStrapOnce()
             return
         }
-        send(.runHapticsPattern, payload: [2, 3, 0, 0, 0], writeType: .withResponse, maverickEffect: 48)
+        // 2 pulses (~1.3 s): short, so little of a burst already sent plays on after a double-tap.
+        send(.runHapticsPattern, payload: [2, 2, 0, 0, 0], writeType: .withResponse, maverickEffect: 48)
     }
 
     /// Haptic Clock (#460): buzz the current wall-clock time out on the strap so the user can read it
